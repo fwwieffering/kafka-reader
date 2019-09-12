@@ -25,9 +25,9 @@ func Execute() {
 func init() {
 	rootCmd.PersistentFlags().StringP("topic", "t", "", "kafka topic name")
 	rootCmd.PersistentFlags().StringP("broker", "b", "", "kafka broker address")
+	rootCmd.PersistentFlags().StringP("partition", "p", "", "Integer. Partition to read from. If not provided, will consume all available messages from every partition. ")
 	rootCmd.PersistentFlags().StringP("clientcert", "c", "", "path to PEM encoded x509 client cert for TLS connections")
 	rootCmd.PersistentFlags().StringP("clientkey", "k", "", "path to PEM encoded x509 client private key for TLS connections")
 	rootCmd.PersistentFlags().StringP("number-messages", "n", "all", "Integer number of messages to read from the topic. ")
-	rootCmd.PersistentFlags().StringP("direction", "d", "forwards", "direction to read from. One of [forwards, backwards]")
 	rootCmd.PersistentFlags().StringP("format", "f", "text", "Format to display kafka messages. One of [json, text]")
 }

@@ -97,8 +97,9 @@ func getKafkaReader(topic string, broker string, cmd *cobra.Command) *utils.Kafk
 			os.Exit(1)
 		}
 	}
+	partition := cmd.Flag("partition").Value.String()
 	format := cmd.Flag("format").Value.String()
-	reader, err := utils.GetKafkaConn(topic, broker, cert, key, cmd.Flag("direction").Value.String(), numberMessages, format)
+	reader, err := utils.GetKafkaConn(topic, broker, cert, key, partition, numberMessages, format)
 	if err != nil {
 		utils.Errorf("Error:\n%s\n", err.Error())
 		os.Exit(1)
@@ -184,7 +185,9 @@ func consumeKafka(cmd *cobra.Command, args []string) {
 				if !firstMessage {
 					k.FormatBetweenMessages()
 				}
-				k.DisplayMessage(msg)
+				if msg != nil {
+					k.DisplayMessage(*msg)
+				}
 			}
 			firstMessage = false
 		}

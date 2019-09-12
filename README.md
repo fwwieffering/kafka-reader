@@ -16,9 +16,9 @@ Flags:
   -b, --broker string            kafka broker address
   -c, --clientcert string        path to PEM encoded x509 client cert for TLS connections
   -k, --clientkey string         path to PEM encoded x509 client private key for TLS connections
-  -d, --direction string         direction to read from. One of [forwards, backwards] (default "forwards")
   -f, --format string            Format to display kafka messages. One of [json, text] (default "text")
   -h, --help                     help for kafka-reader
   -n, --number-messages string   Integer number of messages to read from the topic.  (default "all")
+  -p, --partition string         Integer. Partition to read from. If not provided, will consume all available messages from every partition. 
   -t, --topic string             kafka topic name
 ```

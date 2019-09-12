@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,24 +15,49 @@ import (
 // KafkaConnection holds the kafka.Reader and kafka.Conn structs in order to do
 // reading and get statistics
 type KafkaConnection struct {
-	direction      string
 	numberMessages int
 	readMessages   int
-	reader         *kafka.Reader
-	connection     *kafka.Conn
+	currentReader  int
+	readers        []*kafkaReader
+	readerStats    []kafka.ReaderStats
 	lastOffset     int64
 	Format         string
+}
+
+type kafkaReader struct {
+	conn       *kafka.Conn
+	reader     *kafka.Reader
+	curOffset  int64
+	lastOffset int64
 }
 
 // PrintStats formats reader stats and prints them to stdout
 func (k KafkaConnection) PrintStats() {
 	if k.Format != "json" {
-		stats := k.reader.Stats()
-		Infof("Topic: %s\n", stats.Topic)
-		Infof("Partition: %s\n", stats.Partition)
-		Infof("Messages Read: %d\n", stats.Messages)
-		Infof("Errors: %d\n", stats.Errors)
+		Infof("Total messages: %d\n", k.readMessages)
+		Infof("Partition specific stats: \n")
+		for _, stats := range k.readerStats {
+			Infof("    Topic: %s\n", stats.Topic)
+			Infof("    Partition: %s\n", stats.Partition)
+			Infof("    Messages Read: %d\n", stats.Messages)
+		}
 	}
+}
+
+// getReader returns a reader index to use for the next operation
+// chooses the reader with the lowest current offset
+func (k *KafkaConnection) getReader() (int, error) {
+	if len(k.readers) > 0 {
+		var smallestOffset = -99
+		var index int
+		for idx, r := range k.readers {
+			if smallestOffset != 99 && r.curOffset < int64(smallestOffset) {
+				index = idx
+			}
+		}
+		return index, nil
+	}
+	return 0, StopProcessingError{msg: "No more messages"}
 }
 
 // FormatStart prints the format needed prior to starting reading messages
@@ -77,55 +103,62 @@ func IsStopProcessingError(err error) bool {
 	return ok
 }
 
-// ReadMessage reads a message from the kafka topic. If the reader is already at the latest offset
-// it returns an error
-func (k *KafkaConnection) ReadMessage(ctx context.Context) (kafka.Message, error) {
-	// set lastOffset if it isn't set
-	if k.lastOffset == 0 {
-		latestOffset, err := k.connection.ReadLastOffset()
-		if err != nil {
-			return kafka.Message{}, fmt.Errorf("Error getting offset %s", err.Error())
-		}
-		k.lastOffset = latestOffset
+// ReadMessage chooses an active partition and reads a message from it.
+// should return messages in increasing offset order
+func (k *KafkaConnection) ReadMessage(ctx context.Context) (*kafka.Message, error) {
+	reader, err := k.getReader()
+	if err != nil {
+		return nil, err
 	}
 	// check if we've read the requested number of messages
 	if k.numberMessages != -1 && k.readMessages >= k.numberMessages {
-		return kafka.Message{}, StopProcessingError{msg: fmt.Sprintf("Read %d messages", k.numberMessages)}
-	}
-	// read backwards if we should
-	if k.direction == "backwards" {
-		return k.readMessageBackwards(ctx)
-	}
-	// check if the reader is at the end of the topic
-	readerOffset := k.reader.Offset()
-	if readerOffset == k.lastOffset {
-		return kafka.Message{}, StopProcessingError{msg: fmt.Sprintf("No more messages")}
+		return nil, StopProcessingError{msg: fmt.Sprintf("Read %d messages", k.numberMessages)}
 	}
 	k.readMessages++
 
-	return k.reader.ReadMessage(ctx)
+	msg, err := k.readers[reader].readMessage(ctx)
+
+	// remove reader from k.readers if its done
+	if err != nil && IsStopProcessingError(err) {
+		k.readerStats = append(k.readerStats, k.readers[reader].reader.Stats())
+		k.readers = append(k.readers[:reader], k.readers[reader+1:]...)
+		return msg, nil
+	}
+
+	return msg, err
 }
 
-// this is super slow for some reason
-func (k *KafkaConnection) readMessageBackwards(ctx context.Context) (kafka.Message, error) {
-	// if this is our first message set it to the end
-	if k.readMessages == 0 {
-		k.reader.SetOffset(k.lastOffset - 1)
-	} else {
-		// assuming that each offset corresponds to 1 message, set it back 2 so it reads the one before the one it read last
-		k.reader.SetOffset(k.reader.Offset() - 2)
+// readMessage reads a message from the kafka topic/partition. If the reader is already at the latest offset
+// it returns an error
+func (k *kafkaReader) readMessage(ctx context.Context) (*kafka.Message, error) {
+	// set lastOffset if it isn't set
+	if k.lastOffset == 0 {
+		latestOffset, err := k.conn.ReadLastOffset()
+		if err != nil {
+			return nil, fmt.Errorf("Error getting offset %s", err.Error())
+		}
+		k.lastOffset = latestOffset
 	}
-	k.readMessages++
-	return k.reader.ReadMessage(ctx)
+
+	k.curOffset = k.reader.Offset()
+	if k.curOffset >= k.lastOffset {
+		return nil, StopProcessingError{msg: fmt.Sprintf("reader for partition %d is done", k.reader.Config().Partition)}
+	}
+
+	// get message
+	msg, err := k.reader.ReadMessage(ctx)
+	// check if the reader is at the end of the topic
+
+	return &msg, err
 }
 
 // GetKafkaConn returns a kafka reader
-func GetKafkaConn(topic string, broker string, clientCert, clientKey []byte, direction string, numberMessages int, format string) (*KafkaConnection, error) {
+func GetKafkaConn(topic string, broker string, clientCert, clientKey []byte, partition string, numberMessages int, format string) (*KafkaConnection, error) {
+	// set up dialer with tls if provided
 	dialer := &kafka.Dialer{
 		Timeout:   10 * time.Second,
 		DualStack: true,
 	}
-
 	if clientCert != nil && clientKey != nil {
 		t, err := NewTLSConfig(clientCert, clientKey)
 		if err != nil {
@@ -133,21 +166,56 @@ func GetKafkaConn(topic string, broker string, clientCert, clientKey []byte, dir
 		}
 		dialer.TLS = t
 	}
-	conn, err := dialer.DialLeader(context.Background(), "tcp", broker, topic, 0)
-	if err != nil {
-		return nil, err
+	var partitions []kafka.Partition
+	// check if partition was specified. If not, discover partitions.
+	if len(partition) > 0 {
+		tmp, err := strconv.Atoi(partition)
+		if err != nil {
+			return nil, fmt.Errorf("partition must be an integer")
+		}
+		partitions = []kafka.Partition{{ID: tmp}}
+	} else {
+		// need the kafka.Conn struct to collect info about topic
+		conn, err := dialer.DialLeader(context.Background(), "tcp", broker, topic, 0)
+		if err != nil {
+			return nil, err
+		}
+		// make kafkaReader per partition
+		tmp, err := conn.ReadPartitions()
+		if err != nil {
+			return nil, fmt.Errorf("Unable to read partitions. Error %s", err.Error())
+		}
+		partitions = tmp
+	}
+
+	readers := make([]*kafkaReader, len(partitions))
+
+	for idx, p := range partitions {
+		// need the kafka.Conn struct to collect info about topic
+		conn, err := dialer.DialLeader(context.Background(), "tcp", broker, topic, p.ID)
+		if err != nil {
+			return nil, err
+		}
+		// initialize a reader and set the offset to the first offset
+		reader := kafka.NewReader(kafka.ReaderConfig{
+			Brokers:   []string{broker},
+			Topic:     topic,
+			Dialer:    dialer,
+			Partition: p.ID,
+		})
+		firstOffset, _ := conn.ReadFirstOffset()
+		reader.SetOffset(firstOffset)
+		// init kafkaReader
+		readers[idx] = &kafkaReader{
+			reader: reader,
+			conn:   conn,
+		}
 	}
 
 	return &KafkaConnection{
 		numberMessages: numberMessages,
-		direction:      direction,
-		reader: kafka.NewReader(kafka.ReaderConfig{
-			Dialer:  dialer,
-			Brokers: []string{broker},
-			Topic:   topic,
-		}),
-		connection: conn,
-		Format:     format,
+		readers:        readers,
+		Format:         format,
 	}, nil
 }
 
@@ -183,6 +251,7 @@ func (k KafkaConnection) DisplayMessage(msg kafka.Message) {
 // DisplayMessageText formats a kafka message as text and prints to stdout
 func DisplayMessageText(msg kafka.Message) {
 	fmt.Printf("Key: %s\n", string(msg.Key))
+	fmt.Printf("Partition: %d\n", msg.Partition)
 	fmt.Printf("Offset: %d\n", msg.Offset)
 	fmt.Printf("Timestamp: %s\n", msg.Time.Format(time.RFC3339))
 	fmt.Printf("Content: %s\n", string(msg.Value))
@@ -190,6 +259,7 @@ func DisplayMessageText(msg kafka.Message) {
 }
 
 type kafkaMessageJSON struct {
+	Partition int         `json:"partition"`
 	Offset    int64       `json:"offset"`
 	Timestamp time.Time   `json:"timestamp"`
 	Key       string      `json:"key"`
@@ -204,6 +274,7 @@ func DisplayMessageJSON(msg kafka.Message) {
 	var jsonbytes []byte
 	if err == nil {
 		jsonbytes, err = json.Marshal(kafkaMessageJSON{
+			Partition: msg.Partition,
 			Offset:    msg.Offset,
 			Timestamp: msg.Time,
 			Key:       string(msg.Key),
@@ -211,6 +282,7 @@ func DisplayMessageJSON(msg kafka.Message) {
 		})
 	} else {
 		jsonbytes, _ = json.Marshal(kafkaMessageJSON{
+			Partition: msg.Partition,
 			Offset:    msg.Offset,
 			Timestamp: msg.Time,
 			Key:       string(msg.Key),
