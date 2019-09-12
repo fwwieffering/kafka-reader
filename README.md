@@ -19,6 +19,6 @@ Flags:
   -f, --format string            Format to display kafka messages. One of [json, text] (default "text")
   -h, --help                     help for kafka-reader
   -n, --number-messages string   Integer number of messages to read from the topic.  (default "all")
-  -p, --partition string         Integer. Partition to read from. If not provided, will consume all available messages from every partition. 
+  -p, --partition string         Integer. Partition to read from. If not provided, will consume all available messages from every partition not in exact order. 
   -t, --topic string             kafka topic name
 ```

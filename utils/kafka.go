@@ -48,11 +48,13 @@ func (k KafkaConnection) PrintStats() {
 // chooses the reader with the lowest current offset
 func (k *KafkaConnection) getReader() (int, error) {
 	if len(k.readers) > 0 {
-		var smallestOffset = -99
-		var index int
+		var smallestOffset = k.readers[0].curOffset
+		var index = 0
+	
 		for idx, r := range k.readers {
-			if smallestOffset != 99 && r.curOffset < int64(smallestOffset) {
+			if r.curOffset < smallestOffset {
 				index = idx
+				smallestOffset = r.curOffset
 			}
 		}
 		return index, nil
@@ -140,14 +142,15 @@ func (k *kafkaReader) readMessage(ctx context.Context) (*kafka.Message, error) {
 		k.lastOffset = latestOffset
 	}
 
-	k.curOffset = k.reader.Offset()
+	// check if the reader is at the end of the topic
 	if k.curOffset >= k.lastOffset {
 		return nil, StopProcessingError{msg: fmt.Sprintf("reader for partition %d is done", k.reader.Config().Partition)}
 	}
 
 	// get message
 	msg, err := k.reader.ReadMessage(ctx)
-	// check if the reader is at the end of the topic
+
+	k.curOffset = k.reader.Offset()
 
 	return &msg, err
 }
@@ -209,6 +212,7 @@ func GetKafkaConn(topic string, broker string, clientCert, clientKey []byte, par
 		readers[idx] = &kafkaReader{
 			reader: reader,
 			conn:   conn,
+			curOffset: firstOffset,
 		}
 	}
 
